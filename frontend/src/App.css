@@ -1,0 +1,41 @@
+html, body, #root {
+  height: 100%;          /* Asegura que estos elementos ocupen el 100% del alto de la ventana */
+  width: 100%;           /* Asegura que ocupen el 100% del ancho */
+  margin: 0;             /* Elimina el margen por defecto del body */
+  padding: 0;            /* Elimina el padding por defecto */
+  overflow-x: hidden;    /* Evita el scroll horizontal no deseado */
+  box-sizing: border-box; /* Incluye padding y border en el ancho/alto total */
+}
+
+/* Aplica box-sizing a todos los elementos para un modelo de caja consistente */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+/* Estilo general para el cuerpo del documento */
+body {
+  font-family: Arial, sans-serif; /* O la fuente que prefieras */
+  line-height: 1.6;
+  background-color: #f8f9fa; /* Un color de fondo suave */
+}
+
+/* Clase para el contenedor principal de la aplicación */
+.app-container {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;     /* Asegura que el contenedor tenga al menos el alto de la ventana */
+  width: 100% !important; /* ¡Fuerza el 100% de ancho del contenedor de la aplicación! */
+}
+
+/* Clase para el contenido principal (donde se cargan las rutas) */
+.main-content {
+  flex-grow: 1;          /* Hace que el contenido principal ocupe todo el espacio restante */
+  width: 100% !important; /* ¡Fuerza el 100% de ancho para el contenido principal! */
+  max-width: 100% !important; /* ¡Asegura que no haya un max-width oculto! */
+}
+
+/* Reglas para imágenes para que sean responsivas */
+img {
+  max-width: 100%;       /* Las imágenes no se saldrán de su contenedor */
+  height: auto;          /* Mantienen su proporción */
+}
