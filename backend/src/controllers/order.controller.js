@@ -1,7 +1,27 @@
+// backend/src/controllers/order.controller.js
+
 import prisma from '../config/prisma.js';
 import { Prisma } from '@prisma/client';
-import { auditLog } from '../utils/audit-logger.js'
+import { auditLog } from '../utils/audit-logger.js';
 import { sendEmail } from '../utils/email-sender.js';
+
+// --- Definiciones de Enums (DEBEN COINCIDIR EXACTAMENTE CON EL ESQUEMA DE PRISMA) ---
+// Estado de una orden
+export const OrderStatus = {
+    Pending: 'Pending',         // Orden creada, pago pendiente
+    Processing: 'Processing',   // Pago confirmado, orden en preparación
+    Shipped: 'Shipped',         // Orden enviada
+    Delivered: 'Delivered',     // Orden entregada
+    Cancelled: 'Cancelled',     // Orden cancelada
+};
+
+// Estado de una transacción de pago
+export const PaymentStatus = {
+    Pending: 'Pending',       // Pago iniciado, esperando confirmación
+    Confirmed: 'Confirmed',   // Pago exitoso
+    Cancelled: 'Cancelled',   // Pago cancelado o no confirmado a tiempo
+    Refunded: 'Refunded'      // Pago reembolsado
+};
 
 /**
  * Crea una nueva orden a partir del carrito de compras del usuario y simula el pago.
@@ -14,23 +34,15 @@ export const createOrderAndProcessPayment = async (req, res) => {
     const userId = req.user.id;
     const { shippingAddress, paymentMethod } = req.body; // paymentMethod podría ser 'CreditCard', 'PayPal', etc.
 
-    // --- CAMBIO: Línea 20 (aproximadamente) ---
-    // Se define ipAddress al inicio de la función para que esté en el ámbito correcto
     const ipAddress = req.ip || req.connection.remoteAddress;
-    // Si estás detrás de un proxy/balanceador de carga, podrías necesitar:
-    // const ipAddress = req.headers['x-forwarded-for'] || req.ip || req.connection.remoteAddress;
-    // --- FIN CAMBIO ---
 
     // Validación básica de los campos requeridos
     if (!shippingAddress || !paymentMethod) {
-        // --- CAMBIO: Línea 28 (aproximadamente) ---
-        // Logging antes de enviar respuesta de error para capturar intentos fallidos
         await auditLog('ORDER_CREATION_FAILED', {
             userId: userId,
             details: { error: 'Dirección de envío o método de pago obligatorios', requestBody: req.body },
             ipAddress
         });
-        // --- FIN CAMBIO ---
         return res.status(400).json({ message: 'La dirección de envío y el método de pago son obligatorios.' });
     }
 
@@ -49,49 +61,37 @@ export const createOrderAndProcessPayment = async (req, res) => {
 
         // Verificar si el carrito existe y no está vacío
         if (!cart || cart.items.length === 0) {
-            // --- CAMBIO: Línea 47 (aproximadamente) ---
-            // Logging antes de enviar respuesta de error
             await auditLog('ORDER_CREATION_FAILED', {
                 userId: userId,
                 details: { error: 'El carrito está vacío', cartId: cart ? cart.id : 'N/A' },
                 ipAddress
             });
-            // --- FIN CAMBIO ---
             return res.status(400).json({ message: 'El carrito está vacío. No se puede crear una orden.' });
         }
 
         let totalAmount = 0;
         // 2. Pre-verificar stock y calcular el total de la orden
-        // Esto se hace antes de la transacción para devolver errores rápidamente sin bloquear la DB
         for (const item of cart.items) {
             if (item.product.stock < item.quantity) {
-                // --- CAMBIO: Línea 60 (aproximadamente) ---
-                // Logging antes de enviar respuesta de error
                 await auditLog('ORDER_CREATION_FAILED', {
                     userId: userId,
                     details: { error: `Stock insuficiente para ${item.product.name}`, productId: item.productId, availableStock: item.product.stock, requestedQuantity: item.quantity },
                     ipAddress
                 });
-                // --- FIN CAMBIO ---
                 return res.status(400).json({ message: `Stock insuficiente para ${item.product.name}. Solo hay ${item.product.stock} unidades disponibles.` });
             }
-            totalAmount += item.quantity * item.price; // Asegúrate de que item.price esté bien aquí
+            totalAmount += item.quantity * item.price;
         }
 
         // --- Iniciar una **transacción de base de datos** ---
-        // Esto asegura que todas las operaciones dentro del bloque ($transaction)
-        // se completen con éxito o se reviertan si alguna falla.
-        // --- CAMBIO: Línea 72 (aproximadamente) ---
-        // Capturamos tanto la orden final como el pago final de la transacción
         const transactionResult = await prisma.$transaction(async (prismaTransaction) => {
-        // --- FIN CAMBIO ---
             // 3. Crear la **Orden**
             const order = await prismaTransaction.order.create({
                 data: {
                     userId: userId,
                     totalAmount: totalAmount,
                     shippingAddress: shippingAddress,
-                    orderStatus: 'Pending', // Estado inicial de la orden según tu Enum
+                    orderStatus: OrderStatus.Pending, // Estado inicial de la orden
                 },
             });
 
@@ -100,23 +100,20 @@ export const createOrderAndProcessPayment = async (req, res) => {
                 orderId: order.id,
                 productId: item.productId,
                 quantity: item.quantity,
-                price: item.price, // Usar 'price' como en tu schema.prisma para OrderItem
+                price: item.price,
             }));
 
-            // Crear todos los ítems de la orden en un solo batch
             await prismaTransaction.orderItem.createMany({
                 data: orderItemsData,
             });
 
-            // Actualizar el stock de cada producto individualmente
             for (const item of cart.items) {
                 await prismaTransaction.product.update({
                     where: { id: item.productId },
                     data: {
                         stock: {
-                            decrement: item.quantity, // Decrementar la cantidad vendida
+                            decrement: item.quantity,
                         },
-                        // Actualizar el estado del producto si el stock llega a 0
                         status: item.product.stock - item.quantity === 0 ? 'Out_of_Stock' : 'Available',
                     },
                 });
@@ -126,12 +123,12 @@ export const createOrderAndProcessPayment = async (req, res) => {
             const payment = await prismaTransaction.payment.create({
                 data: {
                     userId: userId,
-                    orderId: order.id, // Enlazar el pago a la orden creada
+                    orderId: order.id,
                     amount: totalAmount,
                     paymentMethod: paymentMethod,
-                    transactionId: `TXN-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`, // ID de transacción simulado
-                    paymentStatus: 'Confirmed', // Usar 'Confirmed' de tu enum PaymentStatus
-                    paidAt: new Date(), // Registrar el momento del pago
+                    transactionId: `TXN-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`,
+                    paymentStatus: PaymentStatus.Pending, // Estado inicial del pago
+                    paidAt: new Date(),
                 },
             });
 
@@ -140,17 +137,15 @@ export const createOrderAndProcessPayment = async (req, res) => {
                 where: { id: order.id },
                 data: {
                     paymentId: payment.id,
-                    orderStatus: 'Processing', // Usar 'Processing' de tu enum OrderStatus
+                    orderStatus: OrderStatus.Processing, // Cambiar a 'Processing' después del pago simulado
                 },
-                include: { // Incluir las relaciones para la respuesta
+                include: {
                     items: {
                         include: {
                             product: true
                         }
                     },
-                    // --- CAMBIO: Línea 124 (aproximadamente) ---
-                    payment: true // Incluir el pago para poder retornarlo
-                    // --- FIN CAMBIO ---
+                    payment: true
                 }
             });
 
@@ -159,31 +154,22 @@ export const createOrderAndProcessPayment = async (req, res) => {
                 where: { cartId: cart.id },
             });
 
-            // --- CAMBIO: Línea 130 (aproximadamente) ---
-            // Retornar la orden actualizada y el pago para usar fuera de la transacción
             return { updatedOrder, payment };
         });
 
-        // Ahora, extraemos la orden y el pago del resultado de la transacción
         const { updatedOrder: finalOrder, payment: finalPayment } = transactionResult;
-        // --- FIN CAMBIO ---
 
-        // Registrar en el log de auditoría
-        // --- CAMBIO: Línea 136 (aproximadamente) ---
-        // Usar finalOrder y finalPayment, y ipAddress que ya está definida
         await auditLog('ORDER_CREATED_AND_PAYMENT_PROCESSED', {
             userId: userId,
             entity: 'Order',
-            entityId: finalOrder.id, // Usar finalOrder
-            details: { totalAmount, paymentStatus: finalPayment.paymentStatus }, // Usar finalPayment
-            ipAddress // Ahora ipAddress está definida
+            entityId: finalOrder.id,
+            details: { totalAmount, paymentStatus: finalPayment.paymentStatus },
+            ipAddress
         });
-        // --- FIN CAMBIO ---
 
-        // --- Envío de Correo de Confirmación de Orden ---
         const customer = await prisma.user.findUnique({
             where: { id: userId },
-            select: { email: true, fullName: true, address: true } // Incluir dirección para el email
+            select: { email: true, fullName: true, address: true }
         });
 
         if (customer && customer.email) {
@@ -225,7 +211,6 @@ export const createOrderAndProcessPayment = async (req, res) => {
 
     } catch (error) {
         console.error('Error al crear orden o procesar pago:', error);
-        // Manejo de errores específicos de Prisma para una mejor retroalimentación
         if (error instanceof Prisma.PrismaClientKnownRequestError) {
             if (error.code === 'P2002') {
                 return res.status(409).json({ message: 'Conflicto de datos. Ya existe un registro con estos valores únicos.' });
@@ -233,27 +218,18 @@ export const createOrderAndProcessPayment = async (req, res) => {
             if (error.code === 'P2025') {
                 return res.status(404).json({ message: 'Recurso no encontrado. Verifique IDs de productos o carrito.' });
             }
-            // Agrega más códigos de error de Prisma si los necesitas
             return res.status(500).json({ message: `Error en la base de datos: ${error.message}` });
         }
         
-        // --- CAMBIO: Línea 198 (aproximadamente) ---
-        // Log para errores generales, incluyendo los ReferenceError. Agregamos stack para mejor depuración.
         await auditLog('ORDER_CREATION_FAILED', {
             userId: userId,
-            details: { error: error.message, stack: error.stack, requestBody: req.body }, // Agregamos stack para mejor depuración
-            ipAddress // ipAddress está definida aquí también
+            details: { error: error.message, stack: error.stack, requestBody: req.body },
+            ipAddress
         });
-        // --- FIN CAMBIO ---
         res.status(500).json({ message: 'Error interno del servidor al procesar la orden o el pago.' });
     }
 };
 
-/**
- * Obtiene el historial de órdenes del usuario autenticado.
- * @param {object} req - Objeto de solicitud.
- * @param {object} res - Objeto de respuesta.
- */
 /**
  * Obtiene el historial de órdenes del usuario autenticado.
  * @param {object} req - Objeto de solicitud.
@@ -278,13 +254,9 @@ export const getUserOrders = async (req, res) => {
             },
         });
 
-        // Mapear las órdenes para convertir los campos Decimal (que vienen como string) a números
         const ordersForFrontend = orders.map(order => ({
             ...order,
-            // 1. Convierte totalAmount a número
             totalAmount: parseFloat(order.totalAmount || 0), 
-            
-            // 2. Mapea los ítems para convertir sus precios y el precio del producto anidado
             items: order.items.map(item => ({
                 ...item,
                 price: parseFloat(item.price || 0), 
@@ -293,15 +265,13 @@ export const getUserOrders = async (req, res) => {
                     price: parseFloat(item.product.price || 0) 
                 }
             })),
-            
-            // 3. Si hay un pago, convierte su 'amount' a número
             payment: order.payment ? {
                 ...order.payment,
                 amount: parseFloat(order.payment.amount || 0)
             } : null
         }));
 
-        res.status(200).json(ordersForFrontend); // Envía los datos convertidos
+        res.status(200).json(ordersForFrontend);
     } catch (error) {
         console.error('Error al obtener el historial de órdenes:', error);
         res.status(500).json({ message: 'Error interno del servidor al obtener el historial de órdenes.' });
@@ -316,9 +286,13 @@ export const getUserOrders = async (req, res) => {
 export const getAllOrders = async (req, res) => {
     const userId = req.user ? req.user.id : null;
     const ipAddress = req.ip; 
+    const { status } = req.query; // Obtener el parámetro de consulta 'status'
 
     try {
+        const whereClause = status && status !== 'Todos' ? { orderStatus: status } : {};
+
         const orders = await prisma.order.findMany({
+            where: whereClause, // Aplicar el filtro si existe
             include: {
                 user: { 
                     select: { id: true, email: true, fullName: true }
@@ -352,8 +326,8 @@ export const getAllOrders = async (req, res) => {
             } : null
         }));
 
-        await auditLog('GET_ALL_ORDERS', { userId, ipAddress });
-        res.status(200).json(ordersForFrontend); // Envía los datos mapeados
+        await auditLog('GET_ALL_ORDERS', { userId, ipAddress, filterStatus: status || 'Todos' });
+        res.status(200).json(ordersForFrontend);
     } catch (error) {
         console.error('Error al obtener todas las órdenes:', error);
         await auditLog('GET_ALL_ORDERS_FAILED', { userId, details: { error: error.message }, ipAddress });
@@ -362,14 +336,13 @@ export const getAllOrders = async (req, res) => {
 };
 
 /**
- * Obtiene una orden específica por su ID. (Solo administradores)
+ * Obtiene una orden específica por su ID. (Solo administradores o dueño de la orden)
  * @param {object} req - Objeto de solicitud.
  * @param {object} res - Objeto de respuesta.
  */
 export const getOrderById = async (req, res) => {
     const { id } = req.params;
     const requestingUserId = req.user ? req.user.id : null;
-    // Asegúrate de que tu token JWT incluye el 'role' del usuario.
     const requestingUserRole = req.user ? req.user.role : null; 
     const ipAddress = req.ip;
 
@@ -384,19 +357,27 @@ export const getOrderById = async (req, res) => {
         });
 
         if (!order) {
-            // ... (log de auditoría) ...
+            await auditLog('GET_ORDER_BY_ID_FAILED_NOT_FOUND', { 
+                userId: requestingUserId, 
+                entity: 'Order', 
+                entityId: parseInt(id), 
+                details: { error: 'Order not found' }, 
+                ipAddress 
+            });
             return res.status(404).json({ message: 'Orden no encontrada.' });
         }
 
-        // --- Lógica de Autorización: CLAVE ---
-        // Si el usuario NO es un administrador Y la orden NO pertenece a este usuario
-        if (requestingUserRole !== 'Admin' && order.userId !== requestingUserId) { // <-- ¡Importante: 'Admin' debe coincidir con el rol en tu DB/token!
-            // ... (log de auditoría de intento no autorizado) ...
+        if (requestingUserRole !== 'Admin' && order.userId !== requestingUserId) {
+            await auditLog('GET_ORDER_BY_ID_UNAUTHORIZED', { 
+                userId: requestingUserId, 
+                entity: 'Order', 
+                entityId: parseInt(id), 
+                details: { error: 'Unauthorized access attempt' }, 
+                ipAddress 
+            });
             return res.status(403).json({ message: 'No tienes permiso para ver esta orden.' });
         }
-        // --- FIN Lógica de Autorización ---
-
-        // ... (el resto de tu código para formatear la orden y enviarla) ...
+        
         const orderForFrontend = {
             ...order,
             totalAmount: parseFloat(order.totalAmount || 0),
@@ -414,38 +395,117 @@ export const getOrderById = async (req, res) => {
             } : null
         };
         
-        // ... (log de auditoría) ...
+        await auditLog('GET_ORDER_BY_ID_SUCCESS', { 
+            userId: requestingUserId, 
+            entity: 'Order', 
+            entityId: parseInt(id), 
+            details: { status: order.orderStatus }, 
+            ipAddress 
+        });
         res.status(200).json(orderForFrontend);
     } catch (error) {
-        // ... (manejo de errores) ...
+        console.error('Error al obtener la orden por ID:', error);
+        await auditLog('GET_ORDER_BY_ID_FAILED_INTERNAL_ERROR', { 
+            userId: requestingUserId, 
+            entity: 'Order', 
+            entityId: parseInt(id), 
+            details: { error: error.message }, 
+            ipAddress 
+        });
+        res.status(500).json({ message: 'Error interno del servidor al obtener la orden.' });
     }
 };
 
 /**
- * Actualiza el estado de una orden. (Solo administradores)
+ * Actualiza el estado de una orden y/o el estado de su pago. (Solo administradores)
  * @param {object} req - Objeto de solicitud.
  * @param {object} res - Objeto de respuesta.
  */
 export const updateOrderStatus = async (req, res) => {
-    // ... (código existente para updateOrderStatus) ...
+    const { id } = req.params;
+    // Ahora esperamos ambos, orderStatus y paymentStatus
+    const { orderStatus, paymentStatus } = req.body;
+    const adminUserId = req.user.id;
+    const ipAddress = req.ip;
 
     try {
-        // ... (código existente para updateOrderStatus) ...
+        const currentOrder = await prisma.order.findUnique({
+            where: { id: parseInt(id) },
+            include: { payment: true, user: { select: { id: true, email: true, fullName: true } } }, // Incluir usuario para correo
+        });
 
+        if (!currentOrder) {
+            await auditLog('ORDER_UPDATE_STATUS_FAILED_NOT_FOUND', {
+                userId: adminUserId, 
+                entity: 'Order', 
+                entityId: parseInt(id), 
+                details: { error: 'Order not found for update' }, 
+                ipAddress
+            });
+            return res.status(404).json({ message: 'Orden no encontrada para actualizar.' });
+        }
+
+        const updateData = {}; // Objeto para construir las actualizaciones
+        const auditDetails = {}; // Objeto para construir los detalles del log de auditoría
+
+        // Validar y añadir orderStatus a updateData si ha cambiado
+        if (orderStatus && orderStatus !== currentOrder.orderStatus) {
+            const validOrderStatuses = Object.values(OrderStatus);
+            if (!validOrderStatuses.includes(orderStatus)) {
+                await auditLog('ORDER_UPDATE_STATUS_FAILED_INVALID', {
+                    userId: adminUserId, 
+                    entity: 'Order', 
+                    entityId: parseInt(id), 
+                    details: { error: `Invalid order status provided: ${orderStatus}` }, 
+                    ipAddress
+                });
+                return res.status(400).json({ message: 'Estado de orden inválido.' });
+            }
+            updateData.orderStatus = orderStatus;
+            auditDetails.oldOrderStatus = currentOrder.orderStatus;
+            auditDetails.newOrderStatus = orderStatus;
+        }
+
+        // Validar y añadir paymentStatus a updateData si ha cambiado y existe un pago
+        if (paymentStatus && currentOrder.payment && paymentStatus !== currentOrder.payment.paymentStatus) {
+            const validPaymentStatuses = Object.values(PaymentStatus);
+            if (!validPaymentStatuses.includes(paymentStatus)) {
+                await auditLog('PAYMENT_UPDATE_STATUS_FAILED_INVALID', {
+                    userId: adminUserId, 
+                    entity: 'Payment', 
+                    entityId: currentOrder.payment.id, 
+                    details: { error: `Invalid payment status provided: ${paymentStatus}` }, 
+                    ipAddress
+                });
+                return res.status(400).json({ message: 'Estado de pago inválido.' });
+            }
+            // Para actualizar un campo anidado como paymentStatus, usamos la sintaxis 'update'
+            updateData.payment = {
+                update: {
+                    paymentStatus: paymentStatus,
+                }
+            };
+            auditDetails.oldPaymentStatus = currentOrder.payment.paymentStatus;
+            auditDetails.newPaymentStatus = paymentStatus;
+        }
+
+        // Si no hay cambios en orderStatus ni paymentStatus, retornar sin hacer nada
+        if (Object.keys(updateData).length === 0) {
+            return res.status(200).json({ message: 'No hay cambios para aplicar.', order: currentOrder });
+        }
+
+        // Realizar la actualización
         const updatedOrder = await prisma.order.update({
             where: { id: parseInt(id) },
-            data: {
-                orderStatus: orderStatus,
-            },
+            data: updateData, // Usa el objeto updateData construido dinámicamente
             include: {
                 user: { select: { id: true, email: true, fullName: true } },
                 items: { include: { product: true } },
-                payment: true
+                payment: true // Asegúrate de incluir el pago para la respuesta y auditoría
             }
         });
 
-        // --- INICIO DE LA MODIFICACIÓN PARA updateOrderStatus (en la respuesta) ---
-        // Crea una versión de la orden actualizada con los campos Decimal convertidos
+        // Formatear la orden para el frontend (conversión de Decimal a Number)
         const updatedOrderForFrontend = {
             ...updatedOrder,
             totalAmount: parseFloat(updatedOrder.totalAmount || 0),
@@ -462,47 +522,63 @@ export const updateOrderStatus = async (req, res) => {
                 amount: parseFloat(updatedOrder.payment.amount || 0)
             } : null
         };
-        // --- FIN DE LA MODIFICACIÓN PARA updateOrderStatus ---
 
-        await auditLog('ORDER_STATUS_UPDATED', {
-            userId: adminUserId, entity: 'Order', entityId: updatedOrder.id,
-            details: {
-                oldStatus: currentOrder.orderStatus,
-                newStatus: updatedOrderForFrontend.orderStatus // Usa la versión convertida aquí también
-            },
+        // Registrar en el log de auditoría
+        await auditLog('ORDER_AND_PAYMENT_STATUS_UPDATED', {
+            userId: adminUserId, 
+            entity: 'Order', 
+            entityId: updatedOrder.id,
+            details: auditDetails, // Usar los detalles de auditoría acumulados
             ipAddress
         });
 
-        // --- Envío de Correo de Notificación de Cambio de Estado ---
-        // Asegúrate de usar updatedOrderForFrontend en el cuerpo del correo si necesitas valores numéricos
-        if (currentOrder.user && currentOrder.user.email) { 
-            const subject = `Actualización de tu Orden #${updatedOrderForFrontend.id} - SIGECOB`;
-            const text = `Hola ${currentOrder.user.fullName || currentOrder.user.email},\n\nEl estado de tu orden #${updatedOrderForFrontend.id} ha cambiado de ${currentOrder.orderStatus} a ${updatedOrderForFrontend.orderStatus}.\n\nSaludos,\nEl equipo de SIGECOB`;
-            const html = `
+        // Envío de Correo de Notificación de Cambio de Estado/Pago
+        if (currentOrder.user && currentOrder.user.email) {
+            let subject = `Actualización de tu Orden #${updatedOrderForFrontend.id} - SIGECOB`;
+            let emailBody = `
                 <p>Hola ${currentOrder.user.fullName || currentOrder.user.email},</p>
-                <p>¡Buenas noticias! El estado de tu orden <strong>#${updatedOrderForFrontend.id}</strong> ha sido actualizado.</p>
-                <p>El estado ha cambiado de <strong>${currentOrder.orderStatus}</strong> a <strong>${updatedOrderForFrontend.orderStatus}</strong>.</p>
-                <p>Puedes revisar los detalles de tu orden en tu cuenta de SIGECOB.</p>
+                <p>¡Buenas noticias! Tu orden <strong>#${updatedOrderForFrontend.id}</strong> ha sido actualizada.</p>
+            `;
+
+            if (auditDetails.oldOrderStatus && auditDetails.newOrderStatus) {
+                emailBody += `<p>El estado de tu orden ha cambiado de <strong>${auditDetails.oldOrderStatus}</strong> a <strong>${auditDetails.newOrderStatus}</strong>.</p>`;
+            }
+            if (auditDetails.oldPaymentStatus && auditDetails.newPaymentStatus) {
+                emailBody += `<p>El estado de tu pago ha cambiado de <strong>${auditDetails.oldPaymentStatus}</strong> a <strong>${auditDetails.newPaymentStatus}</strong>.</p>`;
+            }
+            
+            // Lógica para información de pago (ajústala según tus necesidades específicas para cualquier estado)
+            // Ya que 'ReadyForDispatch' no existe en el esquema, puedes poner esta info cuando el pago sea 'Confirmed'
+            // o cuando el estado de la orden pase a 'Processing' si es el momento de notificar métodos de pago.
+            // Por ahora, no hay lógica específica para un estado de "listo para despacho" aquí,
+            // ya que no existe en tu enum `OrderStatus`.
+
+            emailBody += `
+                <p>Puedes revisar los detalles completos de tu orden en tu cuenta de SIGECOB.</p>
                 <p>Saludos,</p>
                 <p>El equipo de SIGECOB</p>
             `;
-            await sendEmail(currentOrder.user.email, subject, text, html);
+            await sendEmail(currentOrder.user.email, subject, "Se actualizó tu orden.", emailBody);
         }
 
-        res.status(200).json({ message: 'Estado de la orden actualizado exitosamente.', order: updatedOrderForFrontend });     
+        res.status(200).json({ message: 'Estado de la orden/pago actualizado exitosamente.', order: updatedOrderForFrontend });     
 
     } catch (error) {
         console.error('Error al actualizar el estado de la orden:', error);
+        // Asegúrate de que 'id' y 'adminUserId' estén definidos para el auditLog en caso de error
+        const logOrderId = id ? parseInt(id) : null;
+        const logAdminUserId = adminUserId || null;
+
         if (error instanceof Prisma.PrismaClientKnownRequestError) {
             if (error.code === 'P2025') {
                 await auditLog('ORDER_STATUS_UPDATE_FAILED_NOT_FOUND_DB', {
-                    userId: adminUserId, entity: 'Order', entityId: parseInt(id), details: { error: error.message }, ipAddress
+                    userId: logAdminUserId, entity: 'Order', entityId: logOrderId, details: { error: error.message }, ipAddress
                 });
                 return res.status(404).json({ message: 'Orden no encontrada para actualizar.' });
             }
         }
         await auditLog('ORDER_STATUS_UPDATE_FAILED_INTERNAL_ERROR', {
-            userId: adminUserId, entity: 'Order', entityId: parseInt(id), details: { error: error.message }, ipAddress
+            userId: logAdminUserId, entity: 'Order', entityId: logOrderId, details: { error: error.message, stack: error.stack }, ipAddress
         });
         res.status(500).json({ message: 'Error interno del servidor al actualizar el estado de la orden.' });
     }
