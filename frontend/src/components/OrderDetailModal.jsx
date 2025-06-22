@@ -1,19 +1,10 @@
 // frontend/src/components/OrderDetailModal.jsx
-
 import React from 'react';
-
-// Si no estás usando Bootstrap 5, podrías necesitar importar el Modal de 'react-bootstrap'
-// si lo tienes instalado. Para un modal básico solo con CSS de Bootstrap, esto es suficiente.
 
 const OrderDetailModal = ({ order, onClose }) => {
   if (!order) return null; // No renderizar si no hay orden
 
   return (
-    // Overlay del modal
-    // d-flex, justify-content-center, align-items-center centran el contenido
-    // bg-dark bg-opacity-50 para el fondo oscuro (clase de Bootstrap)
-    // position-fixed, top-0, left-0, w-100, h-100 para cubrir toda la pantalla
-    // z-index-1050 (o un valor alto para asegurar que esté encima)
     <div 
       className="modal d-block" // 'd-block' para que Bootstrap lo muestre (por defecto está 'display: none')
       tabIndex="-1" 

@@ -45,6 +45,11 @@ function NavbarComponent() {
                     Gestión Usuarios
                   </Nav.Link>
                 )}
+                {userRole === 'Admin' && (
+                  <Nav.Link as={NavLink} to="/admin/orders" className="mx-2 text-warning fw-bold">
+                    Gestión Órdenes
+                  </Nav.Link>
+                )}
 
                 {userRole === 'Auditor' && (
                   <Nav.Link as={NavLink} to="/admin/audit-logs" className="mx-2 text-warning fw-bold">

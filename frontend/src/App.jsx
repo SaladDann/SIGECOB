@@ -26,6 +26,7 @@ import OrderHistoryPage from './pages/OrderHistoryPage.jsx';
 import ProductManagementPage from './pages/Admin/ProductManagementPage.jsx';
 import UserManagementPage from './pages/Admin/UserManagementPage.jsx';
 import AuditLogPage from './pages/Admin/AuditLogPage.jsx';
+import OrderManagementPage from './pages/Admin/OrderManagementPage.jsx';
 
 const ProtectedRoute = ({ children, roles }) => {
     const { isAuthenticated, user, loading } = useAuth(); // Obtén el estado de autenticación y usuario del contexto
@@ -119,7 +120,12 @@ function App() {
                   <AuditLogPage />
                 </ProtectedRoute>
               } />
-              
+              {/* Nueva ruta para la gestión de órdenes, solo para administradores */}
+                <Route path="/admin/orders" element={
+                  <ProtectedRoute roles={['Admin']}>
+                      <OrderManagementPage />
+                </ProtectedRoute>
+              } />
 
               {/* Catch-all para rutas no encontradas (404) */}
               <Route path="*" element={

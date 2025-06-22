@@ -7,7 +7,7 @@ import { Container, Row, Col, Table, Button, Spinner, Alert, Card } from 'react-
 // Importamos iconos para una mejor usabilidad y estética
 import { FaEye, FaRedoAlt, FaHeadset, FaShoppingBasket, FaInfoCircle } from 'react-icons/fa';
 
-import LoadingSpinner from '../components/LoadingSpinner'; // Asegúrate de que este componente use Bootstrap
+import LoadingSpinner from '../components/LoadingSpinner'; 
 import OrderDetailModal from '../components/OrderDetailModal';
 import SupportContactModal from '../components/SupportContactModal';
 import { useCart } from '../context/CartContext';
